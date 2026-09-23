@@ -212,16 +212,22 @@ namespace olc::host {
     bool Host_Apple_MacOS::SetMousePosition(olc::Window* pWindow, const olc::vi2d& vPos)
     {
         olc_IgnoreUnused(pWindow);
-        dispatch_sync(dispatch_get_main_queue(), ^{
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        dispatch_retain(done);
+        dispatch_async(dispatch_get_main_queue(), ^{
             pMacOSWindow->setCursorPosition(vPos.x, vPos.y);
+            dispatch_semaphore_signal(done);
+            dispatch_release(done);
         });
+        dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 16LL * 1000000LL));
+        dispatch_release(done);
         return false;
     }
 
     bool Host_Apple_MacOS::SetMouseVisible(olc::Window* pWindow, const bool bVisible)
     {
         olc_IgnoreUnused(pWindow);
-        dispatch_sync(dispatch_get_main_queue(), ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
             pMacOSWindow->setCursorVisibility(bVisible);
         });
         return true;
