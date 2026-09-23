@@ -101,6 +101,7 @@ namespace olc
 			std::unordered_map<uint32_t, olc::vi2d> mapTextureSizes;
 
 			std::unordered_map<uint32_t, uint32_t> mapTextureToRenderbuffer;
+			std::unordered_map<uint32_t, bool> mapTextureMipmapped;
 
 			const Shader* pCurrentShader = nullptr;
 

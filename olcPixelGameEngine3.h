@@ -2257,6 +2257,7 @@ namespace olc
 		bool InVRAM = true;
 		bool MSAA = false;
 		uint32_t MSAASamples = OLC_MSAA_SAMPLES;
+		bool Mipmapped = false;
 	};
 
 	struct ImageRegion;
@@ -7279,6 +7280,7 @@ namespace olc
 			std::unordered_map<uint32_t, olc::vi2d> mapTextureSizes;
 
 			std::unordered_map<uint32_t, uint32_t> mapTextureToRenderbuffer;
+			std::unordered_map<uint32_t, bool> mapTextureMipmapped;
 
 			const Shader* pCurrentShader = nullptr;
 
@@ -8674,16 +8676,22 @@ namespace olc::host {
     bool Host_Apple_MacOS::SetMousePosition(olc::Window* pWindow, const olc::vi2d& vPos)
     {
         olc_IgnoreUnused(pWindow);
-        dispatch_sync(dispatch_get_main_queue(), ^{
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        dispatch_retain(done);
+        dispatch_async(dispatch_get_main_queue(), ^{
             pMacOSWindow->setCursorPosition(vPos.x, vPos.y);
+            dispatch_semaphore_signal(done);
+            dispatch_release(done);
         });
+        dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 16LL * 1000000LL));
+        dispatch_release(done);
         return false;
     }
 
     bool Host_Apple_MacOS::SetMouseVisible(olc::Window* pWindow, const bool bVisible)
     {
         olc_IgnoreUnused(pWindow);
-        dispatch_sync(dispatch_get_main_queue(), ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
             pMacOSWindow->setCursorVisibility(bVisible);
         });
         return true;
@@ -9411,6 +9419,7 @@ static constexpr const char* kSetContentViewSel                 = "setContentVie
 static constexpr const char* kContentViewSel                    = "contentView";
 static constexpr const char* kBoundsSel                         = "bounds";
 static constexpr const char* kConvertRectToBackingSel           = "convertRectToBacking:";      // Thank you - Ben the Ultimate Guru
+static constexpr const char* kConvertRectFromBackingSel         = "convertRectFromBacking:";
 static constexpr const char* kConvertPointToBackingSel          = "convertPointToBacking:";
 static constexpr const char* kConvertPointFromBackingSel        = "convertPointFromBacking:";
 static constexpr const char* kConvertPointFromViewSel           = "convertPoint:fromView:";
@@ -9594,6 +9603,7 @@ namespace ObjectiveCSEL {
    static SEL contentViewSel              = nullptr;
    static SEL boundsSel                   = nullptr;
    static SEL convertRectToBackingSel     = nullptr; // Thank you - Ben the Ultimate Guru
+   static SEL convertRectFromBackingSel   = nullptr;
    static SEL convertPointToBackingSel    = nullptr;
    static SEL convertPointFromBackingSel  = nullptr;
    static SEL convertPointFromViewSel     = nullptr;
@@ -9743,6 +9753,7 @@ namespace ObjectiveCSEL {
         contentViewSel                     = sel_registerName(kContentViewSel);
         boundsSel                          = sel_registerName(kBoundsSel);
         convertRectToBackingSel            = sel_registerName(kConvertRectToBackingSel);    // Thank you - Ben the Ultimate Guru
+        convertRectFromBackingSel          = sel_registerName(kConvertRectFromBackingSel);  
         convertPointToBackingSel           = sel_registerName(kConvertPointToBackingSel);
         convertPointFromBackingSel         = sel_registerName(kConvertPointFromBackingSel);
         convertPointFromViewSel            = sel_registerName(kConvertPointFromViewSel);
@@ -10630,7 +10641,7 @@ void view_mouseDown(id self, SEL _cmd, id event) {
     uint8_t nPointerEventType = CGEventGetIntegerValueField(cgEvent, kCGMouseEventSubtype);
 
     // Is it a mouse drag event (subtype 0) or a tablet pointer event (subtype 1 or 2)?
-    if (nPointerEventType == 0) [[likely]] {
+    if (nPointerEventType != kCGEventMouseSubtypeTabletPoint && nPointerEventType != kCGEventMouseSubtypeTabletProximity) [[likely]] {
 
         if (gptrNSWindowEvents && gptrNSWindowEvents->acceptsInputEvents && gptrNSWindowEvents->mouseDownCallback) [[likely]] {
             MouseEventData data = extractMouseEventData(event);
@@ -10662,8 +10673,8 @@ void view_mouseUp(id self, SEL _cmd, id event) {
     uint8_t nPointerEventType = CGEventGetIntegerValueField(cgEvent, kCGMouseEventSubtype);
 
     // Is it a mouse drag event (subtype 0) or a tablet pointer event (subtype 1 or 2)?
-    if (nPointerEventType == 0) [[likely]] {
-
+    if (nPointerEventType != kCGEventMouseSubtypeTabletPoint && nPointerEventType != kCGEventMouseSubtypeTabletProximity) [[likely]] {
+    
         MouseEventData data = extractMouseEventData(event);
         if (gptrNSWindowEvents && gptrNSWindowEvents->acceptsInputEvents && gptrNSWindowEvents->mouseUpCallback) [[likely]] {
             gptrNSWindowEvents->mouseUpCallback(data.location.x, data.location.y, (int)data.buttonNumber,
@@ -10694,8 +10705,8 @@ void view_mouseDragged(id self, SEL _cmd, id event) {
     uint8_t nPointerEventType = CGEventGetIntegerValueField(cgEvent, kCGMouseEventSubtype);
 
     // Is it a mouse drag event (subtype 0) or a tablet pointer event (subtype 1 or 2)?
-    if (nPointerEventType == 0) [[likely]] {
-
+    if (nPointerEventType != kCGEventMouseSubtypeTabletPoint && nPointerEventType != kCGEventMouseSubtypeTabletProximity) [[likely]] {
+    
         if (gptrNSWindowEvents && gptrNSWindowEvents->acceptsInputEvents && gptrNSWindowEvents->mouseDraggedCallback) [[likely]] {
             MouseEventData data = extractMouseEventData(event);
             gptrNSWindowEvents->mouseDraggedCallback(data.location.x, data.location.y, (int)data.buttonNumber, (unsigned int)data.modifierFlags, gptrNSWindowEvents->eventUserData);
@@ -10720,11 +10731,6 @@ void view_mouseDragged(id self, SEL _cmd, id event) {
 // Handle mouse movement events
 void view_mouseMoved(id self, SEL _cmd, id event) {
     (void)self;(void)_cmd;
-
-    CGEventRef cgEvent        = ((CGEventRef(*)(id, SEL))objc_msgSend)(event, ObjectiveCSEL::cgEventSel);
-    uint8_t nPointerEventType = CGEventGetIntegerValueField(cgEvent, kCGMouseEventSubtype);
-    // if it is a trackpad event, ignore it.
-    if (nPointerEventType > 2) return;
     
     // a Mouse move event and Stlus roximity Event have the same properties.
     NSPoint location         = ((NSPoint(*)(id, SEL))objc_msgSend)(event, ObjectiveCSEL::locationInWindowSel);
@@ -10741,11 +10747,6 @@ void view_mouseMoved(id self, SEL _cmd, id event) {
 void view_rightMouseDown(id self, SEL _cmd, id event) {
     (void)self;(void)_cmd;
     
-    CGEventRef cgEvent        = ((CGEventRef(*)(id, SEL))objc_msgSend)(event, ObjectiveCSEL::cgEventSel);
-    uint8_t nPointerEventType = CGEventGetIntegerValueField(cgEvent, kCGMouseEventSubtype);
-    if(nPointerEventType > 2) [[unlikely]]
-        return; // Ignore mouse events that are not mouse drag or tablet pointer events
-    
     MouseEventData data = extractMouseEventData(event);
     if (gptrNSWindowEvents && gptrNSWindowEvents->acceptsInputEvents && gptrNSWindowEvents->rightMouseDownCallback) [[likely]] {
         gptrNSWindowEvents->rightMouseDownCallback(data.location.x, data.location.y, (int)data.buttonNumber, (unsigned int)data.modifierFlags, gptrNSWindowEvents->eventUserData);
@@ -10756,11 +10757,6 @@ void view_rightMouseDown(id self, SEL _cmd, id event) {
 void view_rightMouseUp(id self, SEL _cmd, id event) {
     (void)self;(void)_cmd;
     
-    CGEventRef cgEvent        = ((CGEventRef(*)(id, SEL))objc_msgSend)(event, ObjectiveCSEL::cgEventSel);
-    uint8_t nPointerEventType = CGEventGetIntegerValueField(cgEvent, kCGMouseEventSubtype);
-    if(nPointerEventType > 2) [[unlikely]]
-        return; // Ignore mouse events that are not mouse drag or tablet pointer events
-    
     MouseEventData data = extractMouseEventData(event);
     if (gptrNSWindowEvents && gptrNSWindowEvents->acceptsInputEvents && gptrNSWindowEvents->rightMouseUpCallback) [[likely]] {
         gptrNSWindowEvents->rightMouseUpCallback(data.location.x, data.location.y, (int)data.buttonNumber, (unsigned int)data.modifierFlags, gptrNSWindowEvents->eventUserData);
@@ -10770,11 +10766,6 @@ void view_rightMouseUp(id self, SEL _cmd, id event) {
 // Handle right mouse drag events
 void view_rightMouseDragged(id self, SEL _cmd, id event) {
     (void)self;(void)_cmd;
-
-    CGEventRef cgEvent        = ((CGEventRef(*)(id, SEL))objc_msgSend)(event, ObjectiveCSEL::cgEventSel);
-    uint8_t nPointerEventType = CGEventGetIntegerValueField(cgEvent, kCGMouseEventSubtype);
-    if(nPointerEventType > 2) [[unlikely]]
-        return; // Ignore mouse events that are not mouse drag or tablet pointer events
     
     MouseEventData data = extractMouseEventData(event);
     if (gptrNSWindowEvents && gptrNSWindowEvents->acceptsInputEvents && gptrNSWindowEvents->rightMouseDraggedCallback) [[likely]] {
@@ -10787,11 +10778,6 @@ void view_rightMouseDragged(id self, SEL _cmd, id event) {
 void view_otherMouseDown(id self, SEL _cmd, id event) {
     (void)self;(void)_cmd;
     
-    CGEventRef cgEvent        = ((CGEventRef(*)(id, SEL))objc_msgSend)(event, ObjectiveCSEL::cgEventSel);
-    uint8_t nPointerEventType = CGEventGetIntegerValueField(cgEvent, kCGMouseEventSubtype);
-    if(nPointerEventType > 2) [[unlikely]]
-        return; // Ignore mouse events that are not mouse drag or tablet pointer events
-    
     MouseEventData data = extractMouseEventData(event);
     if (gptrNSWindowEvents && gptrNSWindowEvents->acceptsInputEvents && gptrNSWindowEvents->otherMouseDownCallback) [[likely]] {
         gptrNSWindowEvents->otherMouseDownCallback(data.location.x, data.location.y, (int)data.buttonNumber, (unsigned int)data.modifierFlags, gptrNSWindowEvents->eventUserData);
@@ -10802,11 +10788,6 @@ void view_otherMouseDown(id self, SEL _cmd, id event) {
 void view_otherMouseUp(id self, SEL _cmd, id event) {
     (void)self;(void)_cmd;
     
-    CGEventRef cgEvent        = ((CGEventRef(*)(id, SEL))objc_msgSend)(event, ObjectiveCSEL::cgEventSel);
-    uint8_t nPointerEventType = CGEventGetIntegerValueField(cgEvent, kCGMouseEventSubtype);
-    if(nPointerEventType > 2) [[unlikely]]
-        return; // Ignore mouse events that are not mouse drag or tablet pointer events
-    
     MouseEventData data = extractMouseEventData(event);
     if (gptrNSWindowEvents && gptrNSWindowEvents->acceptsInputEvents && gptrNSWindowEvents->otherMouseUpCallback) {
         gptrNSWindowEvents->otherMouseUpCallback(data.location.x, data.location.y, (int)data.buttonNumber, (unsigned int)data.modifierFlags, gptrNSWindowEvents->eventUserData);
@@ -10816,11 +10797,6 @@ void view_otherMouseUp(id self, SEL _cmd, id event) {
 void view_otherMouseDragged(id self, SEL _cmd, id event) {
     (void)self;(void)_cmd;
 
-    CGEventRef cgEvent        = ((CGEventRef(*)(id, SEL))objc_msgSend)(event, ObjectiveCSEL::cgEventSel);
-    uint8_t nPointerEventType = CGEventGetIntegerValueField(cgEvent, kCGMouseEventSubtype);
-    if(nPointerEventType > 2) [[unlikely]]
-        return; // Ignore mouse events that are not mouse drag or tablet pointer events
-    
     MouseEventData data = extractMouseEventData(event);
     if (gptrNSWindowEvents && gptrNSWindowEvents->acceptsInputEvents && gptrNSWindowEvents->otherMouseDraggedCallback) [[likely]] {
         gptrNSWindowEvents->otherMouseDraggedCallback(data.location.x, data.location.y, (int)data.buttonNumber, (unsigned int)data.modifierFlags, gptrNSWindowEvents->eventUserData);
@@ -11364,7 +11340,15 @@ extern "C" {
 
     // Destroy the window
     void window_destroy(Window* self) {
-        (void)self;
+        if (self) {
+            self->acceptsInputEvents = NO;
+            if (gptrNSWindowEvents == self) {
+                gptrNSWindowEvents = NULL;
+            }
+            if (gptrWindowDelegate == self) {
+                gptrWindowDelegate = NULL;
+            }
+        }
         // NSWindow will be cleaned up by autorelease pool
     }
 
@@ -11676,7 +11660,8 @@ extern "C" {
         ((void(*)(id, SEL))objc_msgSend)(self->glContext, ObjectiveCSEL::makeCurrentContextSel);
         
         // Update the view frame
-        NSRect newFrame = {0.0, 0.0, width, height};
+        NSRect pixelFrame = {0.0, 0.0, width, height};
+        NSRect newFrame = ((NSRect(*)(id, SEL, NSRect))objc_msgSend)(self->glView, ObjectiveCSEL::convertRectFromBackingSel, pixelFrame);
         ((void(*)(id, SEL, NSRect))objc_msgSend)(self->glView, ObjectiveCSEL::setFrameSel, newFrame);
         
         // Force context to reshape
@@ -17196,7 +17181,12 @@ void main()
 			gl.glGenTextures(1, &new_id);
 			glBindTexture(GL_TEXTURE_2D, new_id);
 
-			if (cfg.Filtered)
+			if (cfg.Mipmapped)
+			{
+				gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+				gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, cfg.Filtered ? GL_LINEAR : GL_NEAREST);
+			}
+			else if (cfg.Filtered)
 			{
 				gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 				gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -17240,17 +17230,90 @@ void main()
 #endif
 
 		mapTextureSizes[id] = vSize;
+		mapTextureMipmapped[id] = cfg.Mipmapped;
 		return id;
+	}
+
+	static std::vector<olc::Pixel> GenerateMipLevel(const olc::Pixel* source,
+		const olc::vi2d& sourceSize, const olc::vi2d& destinationSize)
+	{
+		std::vector<olc::Pixel> destination(size_t(destinationSize.x) * size_t(destinationSize.y));
+		olc::Pixel* out = destination.data();
+
+		const size_t dx = sourceSize.x > 1 ? 1 : 0;
+		const size_t dy = sourceSize.y > 1 ? size_t(sourceSize.x) : 0;
+
+		for (int32_t y = 0; y < destinationSize.y; y++)
+		{
+			const olc::Pixel* row = source + size_t(y) * 2 * size_t(sourceSize.x);
+
+			for (int32_t x = 0; x < destinationSize.x; x++, out++)
+			{
+				const olc::Pixel* p = row + size_t(x) * 2;
+				const olc::Pixel texelBlock[4] = { p[0], p[dx], p[dy], p[dx + dy] };
+
+				uint32_t totalAlpha = 0;
+				for (const olc::Pixel& texel : texelBlock)
+					totalAlpha += texel.a;
+
+				uint32_t r = 0, g = 0, b = 0;
+				if (totalAlpha > 0) 
+				{					
+					for (const olc::Pixel& texel : texelBlock)
+					{
+						r += texel.r * texel.a;
+						g += texel.g * texel.a;
+						b += texel.b * texel.a;
+					}					
+				}
+				else
+				{				
+					totalAlpha = 4;						
+					for (const olc::Pixel& texel : texelBlock)
+					{
+						r += texel.r;
+						g += texel.g;
+						b += texel.b;
+					}
+				}
+
+				out->r = uint8_t(r / totalAlpha);
+				out->g = uint8_t(g / totalAlpha);
+				out->b = uint8_t(b / totalAlpha);
+				out->a = uint8_t(totalAlpha / 4);
+			}
+		}
+
+		return destination;
 	}
 
 	bool Renderer_OGL33::WriteTexture(const uint32_t texid, olc::Image& image)
 	{
 		auto& gl = olc::apis::opengl::gl::Get();
 
+		olc::vi2d currentSize = image.Size();
+
 		// Always write to the regular texture (for sampling)
 		gl.glBindTexture(GL_TEXTURE_2D, texid);
-		gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.Size().x, image.Size().y, 0, 
-			GL_RGBA, GL_UNSIGNED_BYTE, image.Data());
+		gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, currentSize.x, currentSize.y, 0, 
+			GL_RGBA, GL_UNSIGNED_BYTE, image.Data());		
+
+		if (currentSize.x > 0 && currentSize.y > 0 && mapTextureMipmapped[texid])
+		{
+			const olc::Pixel* source = image.Data();
+			std::vector<olc::Pixel> level;
+
+			for (int32_t levelIndex = 1; currentSize.x > 1 || currentSize.y > 1; levelIndex++)
+			{
+				const olc::vi2d nextSize = { std::max(1, currentSize.x / 2), std::max(1, currentSize.y / 2) };
+				level = GenerateMipLevel(source, currentSize, nextSize);
+				source = level.data();
+				currentSize = nextSize;
+
+				gl.glTexImage2D(GL_TEXTURE_2D, levelIndex, GL_RGBA, currentSize.x, currentSize.y, 0,
+					GL_RGBA, GL_UNSIGNED_BYTE, level.data());
+			}
+		}
 
 		// If this texture has MSAA, allocate storage for the renderbuffer
 		if (mapTextureToRenderbuffer.contains(texid))
@@ -17315,6 +17378,7 @@ void main()
 		}
 
 		mapTextureSizes.erase(texid);
+		mapTextureMipmapped.erase(texid);
 
 		if (nCurrentTextureSource == texid)
 			nCurrentTextureSource = 0;
